@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+set -e
+
+echo "🚀 Bootstrapping Overstock Demo (PHI-free)..."
+
+mkdir -p prisma src/{app/{dashboard,overstock,expiry,transfers,connectors,exports,api/{kpi,overstock,transfers/recommendations,exports/overstock.csv}},components,lib,services}
+
+# ---------------- BASIC FILES ----------------
+cat <<EOF > .env.example
+DATABASE_URL="file:./dev.db"
+EOF
+
+cat <<EOF > .gitignore
+node_modules
+.next
+.env
+.env.local
+*.db
+.DS_Store
+EOF
+
+cat <<EOF > package.json
+{
+  "name": "overstock-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "db:seed": "node prisma/seed.mjs"
+  },
+  "dependencies": {
+    "next": "14.2.16",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "@prisma/client": "^5.19.1",
+    "@tanstack/react-table": "^8.20.5"
+  },
+  "devDependencies": {
+    "prisma": "^5.19.1",
+    "typescript": "^5.7.2"
+  }
+}
+EOF
+
+# ---------------- PRISMA ----------------
+cat <<EOF > prisma/schema.prisma
+generator client { provider = "prisma-client-js" }
+datasource db { provider = "sqlite" url = env("DATABASE_URL") }
+
+model Item {
+  id String @id @default(cuid())
+  sku String @unique
+  name String
+  category String
+}
+
+model InventorySnapshot {
+  id String @id @default(cuid())
+  itemId String
+  location String
+  onHand Int
+  maxPar Int
+}
+EOF
+
+cat <<EOF > prisma/seed.mjs
+import { PrismaClient } from "@prisma/client";
+const prisma = new PrismaClient();
+
+await prisma.item.createMany({
+  data: [
+    { sku: "SKU-1001", name: "Gauze 4x4", category: "Wound Care" },
+    { sku: "SKU-1002", name: "IV Kit", category: "IV" }
+  ]
+});
+
+await prisma.inventorySnapshot.createMany({
+  data: [
+    { itemId: "SKU-1001", location: "OR", onHand: 120, maxPar: 60 },
+    { itemId: "SKU-1002", location: "ED", onHand: 80, maxPar: 40 }
+  ]
+});
+
+console.log("✅ Seeded demo data");
+process.exit(0);
+EOF
+
+# ---------------- SERVICES ----------------
+cat <<EOF > src/services/overstockEngine.ts
+import { prisma } from "@/lib/db";
+
+export async function getOverstock() {
+  const rows = await prisma.inventorySnapshot.findMany();
+  return rows.filter(r => r.onHand > r.maxPar).map(r => ({
+    ...r,
+    overBy: r.onHand - r.maxPar
+  }));
+}
+EOF
+
+# ---------------- DB ----------------
+cat <<EOF > src/lib/db.ts
+import { PrismaClient } from "@prisma/client";
+export const prisma = new PrismaClient();
+EOF
+
+# ---------------- API ----------------
+cat <<EOF > src/app/api/overstock/route.ts
+import { NextResponse } from "next/server";
+import { getOverstock } from "@/services/overstockEngine";
+
+export async function GET() {
+  return NextResponse.json(await getOverstock());
+}
+EOF
+
+cat <<EOF > src/app/api/exports/overstock.csv/route.ts
+import { getOverstock } from "@/services/overstockEngine";
+
+export async function GET() {
+  const rows = await getOverstock();
+  const csv = ["sku,location,onHand,maxPar,overBy"]
+    .concat(rows.map(r => \`\${r.itemId},\${r.location},\${r.onHand},\${r.maxPar},\${r.overBy}\`))
+    .join("\\n");
+
+  return new Response(csv, {
+    headers: {
+      "Content-Type": "text/csv",
+      "Content-Disposition": "attachment; filename=overstock.csv"
+    }
+  });
+}
+EOF
+
+# ---------------- UI ----------------
+cat <<EOF > src/app/layout.tsx
+export default function Layout({ children }) {
+  return (
+    <html>
+      <body>
+        <nav>
+          <a href="/dashboard">Dashboard</a> |
+          <a href="/overstock">Overstock</a> |
+          <a href="/exports">Exports</a>
+        </nav>
+        {children}
+      </body>
+    </html>
+  );
+}
+EOF
+
+cat <<EOF > src/app/dashboard/page.tsx
+export default function Dashboard() {
+  return <h1>Dashboard KPIs (Demo)</h1>;
+}
+EOF
+
+cat <<EOF > src/app/overstock/page.tsx
+"use client";
+import { useEffect, useState } from "react";
+
+export default function Overstock() {
+  const [rows, setRows] = useState([]);
+  useEffect(() => {
+    fetch("/api/overstock").then(r => r.json()).then(setRows);
+  }, []);
+
+  return (
+    <div>
+      <h1>Overstock</h1>
+      <pre>{JSON.stringify(rows, null, 2)}</pre>
+    </div>
+  );
+}
+EOF
+
+cat <<EOF > src/app/exports/page.tsx
+export default function Exports() {
+  return <a href="/api/exports/overstock.csv">Download Overstock CSV</a>;
+}
+EOF
+
+echo "✅ DONE. Run:"
+echo "npm install"
+echo "npx prisma migrate dev --name init"
+echo "npm run db:seed"
+echo "npm run dev"
