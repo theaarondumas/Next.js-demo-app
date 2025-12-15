@@ -1,0 +1,692 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="OverstockDemoIOS"
+
+echo "🚀 Creating native SwiftUI iOS demo app in ./${APP_DIR} ..."
+rm -rf "${APP_DIR}"
+mkdir -p "${APP_DIR}/Sources/Views"
+
+# ---------------- project.yml (XcodeGen) ----------------
+cat <<'EOF' > "${APP_DIR}/project.yml"
+name: OverstockDemoIOS
+options:
+  bundleIdPrefix: com.demo
+targets:
+  OverstockDemoIOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.demo.overstockdemoios
+        DEVELOPMENT_TEAM: ""
+        SWIFT_VERSION: 5.0
+EOF
+
+# ---------------- README ----------------
+cat <<'EOF' > "${APP_DIR}/README.md"
+# OverstockDemoIOS (PHI-free)
+
+Native SwiftUI demo app (no PHI) that mirrors:
+- Dashboard KPIs (overstock + expiry ≤ 30 days)
+- Overstock exceptions (scored)
+- Expiry list (≤ 30 days)
+- Transfers recommendations + “create demo transfer” (local)
+- Connectors (Oracle/Medline/Microsoft demo stubs)
+- Exports: local CSV + optional API CSV
+
+## Setup (Mac)
+1) Install XcodeGen:
+   brew install xcodegen
+
+2) Generate Xcode project:
+   cd OverstockDemoIOS
+   xcodegen generate
+
+3) Open:
+   open OverstockDemoIOS.xcodeproj
+
+## Optional: connect to your deployed Next.js demo
+In-app Settings:
+- Set Base URL (example: https://your-demo.vercel.app)
+- Turn OFF “Demo Mode” to fetch live endpoints (KPIs/overstock/recs/export CSV).
+EOF
+
+# ---------------- App entry ----------------
+cat <<'EOF' > "${APP_DIR}/Sources/OverstockDemoIOSApp.swift"
+import SwiftUI
+
+@main
+struct OverstockDemoIOSApp: App {
+    @StateObject private var state = AppState()
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environmentObject(state)
+        }
+    }
+}
+EOF
+
+# ---------------- AppState ----------------
+cat <<'EOF' > "${APP_DIR}/Sources/AppState.swift"
+import Foundation
+
+@MainActor
+final class AppState: ObservableObject {
+    @Published var demoMode: Bool = true
+    @Published var baseURLString: String = "" // e.g. https://your-demo.vercel.app
+
+    @Published var createdTransfers: [TransferTicket] = []
+
+    var baseURL: URL? {
+        guard !baseURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return URL(string: baseURLString)
+    }
+
+    func createDemoTransfer(from rec: TransferRecommendation) {
+        let ticket = TransferTicket(
+            id: UUID().uuidString,
+            createdAt: Date(),
+            from: rec.from,
+            to: rec.to,
+            sku: rec.sku,
+            itemName: rec.itemName,
+            qty: rec.qty,
+            status: "DRAFT"
+        )
+        createdTransfers.insert(ticket, at: 0)
+    }
+}
+EOF
+
+# ---------------- Models ----------------
+cat <<'EOF' > "${APP_DIR}/Sources/Models.swift"
+import Foundation
+
+struct KPI: Codable, Hashable {
+    let overstockItems: Int
+    let overstockUnits: Int
+    let expiryLots30: Int
+    let expiryUnits30: Int
+}
+
+struct OverstockRow: Codable, Hashable, Identifiable {
+    var id: String { "\(sku)-\(locationName)" }
+    let sku: String
+    let itemName: String
+    let category: String
+    let locationName: String
+    let onHand: Int
+    let maxPar: Int
+    let overBy: Int
+    let score: Int
+}
+
+struct ExpiryLot: Codable, Hashable, Identifiable {
+    let id: String
+    let itemName: String
+    let locationName: String
+    let qty: Int
+    let expiryDate: String // yyyy-mm-dd
+}
+
+struct TransferRecommendation: Codable, Hashable, Identifiable {
+    var id: String { "\(sku)-\(from)-\(to)" }
+    let sku: String
+    let itemName: String
+    let from: String
+    let to: String
+    let qty: Int
+    let reason: String
+}
+
+struct ConnectorStub: Codable, Hashable, Identifiable {
+    let id: String
+    let name: String
+    let status: String
+    let lastRunISO: String
+}
+
+struct TransferTicket: Hashable, Identifiable {
+    let id: String
+    let createdAt: Date
+    let from: String
+    let to: String
+    let sku: String
+    let itemName: String
+    let qty: Int
+    let status: String
+}
+EOF
+
+# ---------------- DemoData ----------------
+cat <<'EOF' > "${APP_DIR}/Sources/DemoData.swift"
+import Foundation
+
+enum DemoData {
+    static let kpi = KPI(overstockItems: 7, overstockUnits: 142, expiryLots30: 5, expiryUnits30: 61)
+
+    static let overstock: [OverstockRow] = [
+        .init(sku: "SKU-1001", itemName: "Gauze 4x4 Sterile", category: "Wound Care", locationName: "OR Core", onHand: 85, maxPar: 60, overBy: 25, score: 42),
+        .init(sku: "SKU-1004", itemName: "Gloves Nitrile Medium", category: "PPE", locationName: "Main Storeroom", onHand: 320, maxPar: 250, overBy: 70, score: 28),
+        .init(sku: "SKU-1002", itemName: "Syringe 10mL Luer Lock", category: "Syringes", locationName: "OR Core", onHand: 92, maxPar: 60, overBy: 32, score: 53)
+    ]
+
+    static let expiry: [ExpiryLot] = [
+        .init(id: "LOT-1", itemName: "Gauze 4x4 Sterile", locationName: "OR Core", qty: 10, expiryDate: inDays(18)),
+        .init(id: "LOT-2", itemName: "Saline Flush 10mL", locationName: "Main Storeroom", qty: 25, expiryDate: inDays(25)),
+        .init(id: "LOT-3", itemName: "IV Start Kit", locationName: "OR Core", qty: 12, expiryDate: inDays(11))
+    ]
+
+    static let transferRecs: [TransferRecommendation] = [
+        .init(sku: "SKU-1001", itemName: "Gauze 4x4 Sterile", from: "OR Core", to: "Med/Surg 3N", qty: 12, reason: "OR over threshold + MS3N under min par"),
+        .init(sku: "SKU-1002", itemName: "Syringe 10mL Luer Lock", from: "Main Storeroom", to: "ED Supply", qty: 20, reason: "Storeroom over + ED demand trend")
+    ]
+
+    static let connectors: [ConnectorStub] = [
+        .init(id: "C1", name: "Oracle (Demo)", status: "OK", lastRunISO: isoNowMinus(hours: 2)),
+        .init(id: "C2", name: "Medline (Demo)", status: "OK", lastRunISO: isoNowMinus(hours: 6)),
+        .init(id: "C3", name: "Microsoft 365 (Demo)", status: "OK", lastRunISO: isoNowMinus(hours: 1))
+    ]
+
+    static func makeOverstockCSV(rows: [OverstockRow]) -> String {
+        let header = "sku,itemName,category,locationName,onHand,maxPar,overBy,score"
+        let lines = rows.map { r in
+            [r.sku, r.itemName, r.category, r.locationName, "\(r.onHand)", "\(r.maxPar)", "\(r.overBy)", "\(r.score)"]
+                .map(csvEscape)
+                .joined(separator: ",")
+        }
+        return ([header] + lines).joined(separator: "\n")
+    }
+
+    private static func csvEscape(_ s: String) -> String {
+        let needsQuotes = s.contains(",") || s.contains("\"") || s.contains("\n")
+        let escaped = s.replacingOccurrences(of: "\"", with: "\"\"")
+        return needsQuotes ? "\"\(escaped)\"" : escaped
+    }
+
+    private static func inDays(_ n: Int) -> String {
+        let d = Calendar.current.date(byAdding: .day, value: n, to: Date())!
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: d)
+    }
+
+    private static func isoNowMinus(hours: Int) -> String {
+        let d = Calendar.current.date(byAdding: .hour, value: -hours, to: Date())!
+        return ISO8601DateFormatter().string(from: d)
+    }
+}
+EOF
+
+# ---------------- API ----------------
+cat <<'EOF' > "${APP_DIR}/Sources/API.swift"
+import Foundation
+
+enum APIError: Error {
+    case missingBaseURL
+    case badResponse
+}
+
+struct API {
+    static func fetchKPIs(baseURL: URL) async throws -> KPI {
+        let url = baseURL.appending(path: "api/kpi")
+        return try await getJSON(url)
+    }
+
+    static func fetchOverstock(baseURL: URL) async throws -> [OverstockRow] {
+        let url = baseURL.appending(path: "api/overstock")
+        return try await getJSON(url)
+    }
+
+    static func fetchTransferRecs(baseURL: URL) async throws -> [TransferRecommendation] {
+        let url = baseURL.appending(path: "api/transfers/recommendations")
+        return try await getJSON(url)
+    }
+
+    static func downloadOverstockCSV(baseURL: URL) async throws -> String {
+        let url = baseURL.appending(path: "api/exports/overstock.csv")
+        let (data, resp) = try await URLSession.shared.data(from: url)
+        guard let r = resp as? HTTPURLResponse, (200...299).contains(r.statusCode) else { throw APIError.badResponse }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func getJSON<T: Decodable>(_ url: URL) async throws -> T {
+        let (data, resp) = try await URLSession.shared.data(from: url)
+        guard let r = resp as? HTTPURLResponse, (200...299).contains(r.statusCode) else { throw APIError.badResponse }
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+}
+EOF
+
+# ---------------- CSV Share ----------------
+cat <<'EOF' > "${APP_DIR}/Sources/CSV.swift"
+import Foundation
+import UIKit
+
+enum CSVShare {
+    static func share(text: String, filename: String = "overstock.csv") {
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        try? text.data(using: .utf8)?.write(to: temp)
+
+        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let root = scene.windows.first?.rootViewController else { return }
+
+        let vc = UIActivityViewController(activityItems: [temp], applicationActivities: nil)
+        root.present(vc, animated: true)
+    }
+}
+EOF
+
+# ---------------- RootView ----------------
+cat <<'EOF' > "${APP_DIR}/Sources/Views/RootView.swift"
+import SwiftUI
+
+struct RootView: View {
+    var body: some View {
+        TabView {
+            DashboardView().tabItem { Label("Dashboard", systemImage: "gauge") }
+            OverstockView().tabItem { Label("Overstock", systemImage: "list.bullet") }
+            ExpiryView().tabItem { Label("Expiry", systemImage: "clock") }
+            TransfersView().tabItem { Label("Transfers", systemImage: "arrow.left.arrow.right") }
+            ConnectorsView().tabItem { Label("Connectors", systemImage: "plugs.connected") }
+            ExportsView().tabItem { Label("Exports", systemImage: "square.and.arrow.down") }
+            SettingsView().tabItem { Label("Settings", systemImage: "gear") }
+        }
+    }
+}
+EOF
+
+# ---------------- DashboardView ----------------
+cat <<'EOF' > "${APP_DIR}/Sources/Views/DashboardView.swift"
+import SwiftUI
+
+struct DashboardView: View {
+    @EnvironmentObject var state: AppState
+    @State private var kpi: KPI? = nil
+    @State private var loading = false
+    @State private var err: String? = nil
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("DEMO MODE • SYNTHETIC DATA ONLY")
+                    .font(.caption).padding(8)
+                    .background(.orange.opacity(0.15))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                if loading { ProgressView() }
+
+                if let k = kpi {
+                    grid(k)
+                } else {
+                    Text("No data yet.")
+                        .foregroundStyle(.secondary)
+                }
+
+                if let e = err {
+                    Text(e).foregroundStyle(.red).font(.caption)
+                }
+
+                Spacer()
+            }
+            .padding()
+            .navigationTitle("Dashboard")
+            .toolbar {
+                Button("Refresh") { Task { await load() } }
+            }
+            .task { await load() }
+        }
+    }
+
+    @ViewBuilder
+    private func grid(_ k: KPI) -> some View {
+        let items: [(String, String)] = [
+            ("Overstock exceptions", "\(k.overstockItems)"),
+            ("Units above threshold", "\(k.overstockUnits)"),
+            ("Lots expiring ≤ 30 days", "\(k.expiryLots30)"),
+            ("Units expiring ≤ 30 days", "\(k.expiryUnits30)")
+        ]
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+            ForEach(items, id: \.0) { label, value in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(label).font(.caption).foregroundStyle(.secondary)
+                    Text(value).font(.title2).bold()
+                }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.gray.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+            }
+        }
+    }
+
+    private func load() async {
+        err = nil
+        loading = true
+        defer { loading = false }
+
+        if state.demoMode {
+            kpi = DemoData.kpi
+            return
+        }
+
+        guard let base = state.baseURL else {
+            err = "Set Base URL in Settings or enable Demo Mode."
+            return
+        }
+
+        do {
+            kpi = try await API.fetchKPIs(baseURL: base)
+        } catch {
+            err = "Failed to fetch KPIs. \(error)"
+        }
+    }
+}
+EOF
+
+# ---------------- OverstockView ----------------
+cat <<'EOF' > "${APP_DIR}/Sources/Views/OverstockView.swift"
+import SwiftUI
+
+struct OverstockView: View {
+    @EnvironmentObject var state: AppState
+    @State private var rows: [OverstockRow] = []
+    @State private var q = ""
+    @State private var loading = false
+    @State private var err: String? = nil
+
+    var filtered: [OverstockRow] {
+        guard !q.isEmpty else { return rows }
+        let s = q.lowercased()
+        return rows.filter {
+            $0.itemName.lowercased().contains(s) ||
+            $0.sku.lowercased().contains(s) ||
+            $0.locationName.lowercased().contains(s)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List(filtered) { r in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("\(r.sku) — \(r.itemName)").font(.headline)
+                        Spacer()
+                        Text("Score \(r.score)").font(.caption).padding(6)
+                            .background(.blue.opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                    Text("\(r.locationName) • \(r.category)")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("OnHand \(r.onHand) • MaxPar \(r.maxPar) • OverBy \(r.overBy)")
+                        .font(.caption)
+                }
+                .padding(.vertical, 4)
+            }
+            .searchable(text: $q)
+            .navigationTitle("Overstock")
+            .toolbar { Button("Refresh") { Task { await load() } } }
+            .overlay { if loading { ProgressView() } }
+            .task { await load() }
+        }
+    }
+
+    private func load() async {
+        err = nil
+        loading = true
+        defer { loading = false }
+
+        if state.demoMode {
+            rows = DemoData.overstock.sorted { $0.score > $1.score }
+            return
+        }
+
+        guard let base = state.baseURL else {
+            err = "Set Base URL in Settings or enable Demo Mode."
+            return
+        }
+
+        do {
+            rows = try await API.fetchOverstock(baseURL: base)
+        } catch {
+            err = "Failed to fetch overstock. \(error)"
+        }
+    }
+}
+EOF
+
+# ---------------- ExpiryView ----------------
+cat <<'EOF' > "${APP_DIR}/Sources/Views/ExpiryView.swift"
+import SwiftUI
+
+struct ExpiryView: View {
+    @EnvironmentObject var state: AppState
+    @State private var lots: [ExpiryLot] = DemoData.expiry
+
+    var body: some View {
+        NavigationStack {
+            List(lots) { l in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(l.itemName).font(.headline)
+                    Text("\(l.locationName) • Qty \(l.qty)")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Expiry: \(l.expiryDate)")
+                        .font(.caption).foregroundStyle(.red)
+                }
+                .padding(.vertical, 4)
+            }
+            .navigationTitle("Expiry ≤ 30d")
+            .toolbar {
+                Text(state.demoMode ? "Demo" : "Live")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+EOF
+
+# ---------------- TransfersView ----------------
+cat <<'EOF' > "${APP_DIR}/Sources/Views/TransfersView.swift"
+import SwiftUI
+
+struct TransfersView: View {
+    @EnvironmentObject var state: AppState
+    @State private var recs: [TransferRecommendation] = []
+    @State private var loading = false
+    @State private var err: String? = nil
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 12) {
+                if loading { ProgressView() }
+
+                if let e = err {
+                    Text(e).foregroundStyle(.red).font(.caption)
+                }
+
+                List {
+                    Section("Recommendations") {
+                        ForEach(recs) { r in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("\(r.sku) — \(r.itemName)").font(.headline)
+                                Text("\(r.from) → \(r.to) • Qty \(r.qty)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Text(r.reason).font(.caption)
+
+                                Button("Create demo transfer") {
+                                    state.createDemoTransfer(from: r)
+                                }
+                                .buttonStyle(.bordered)
+                                .padding(.top, 4)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                        if recs.isEmpty {
+                            Text("No recommendations.")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Section("Created (Local)") {
+                        ForEach(state.createdTransfers) { t in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("\(t.sku) — \(t.itemName)").font(.headline)
+                                Text("\(t.from) → \(t.to) • Qty \(t.qty)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Text("Status: \(t.status) • \(t.createdAt.formatted())")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                        if state.createdTransfers.isEmpty {
+                            Text("No transfers created yet.")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Transfers")
+            .toolbar { Button("Refresh") { Task { await load() } } }
+            .task { await load() }
+        }
+    }
+
+    private func load() async {
+        err = nil
+        loading = true
+        defer { loading = false }
+
+        if state.demoMode {
+            recs = DemoData.transferRecs
+            return
+        }
+
+        guard let base = state.baseURL else {
+            err = "Set Base URL in Settings or enable Demo Mode."
+            return
+        }
+
+        do {
+            recs = try await API.fetchTransferRecs(baseURL: base)
+        } catch {
+            err = "Failed to fetch recommendations. \(error)"
+        }
+    }
+}
+EOF
+
+# ---------------- ConnectorsView ----------------
+cat <<'EOF' > "${APP_DIR}/Sources/Views/ConnectorsView.swift"
+import SwiftUI
+
+struct ConnectorsView: View {
+    @State private var connectors = DemoData.connectors
+
+    var body: some View {
+        NavigationStack {
+            List(connectors) { c in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(c.name).font(.headline)
+                    Text("Status: \(c.status)").font(.caption).foregroundStyle(.secondary)
+                    Text("Last run: \(c.lastRunISO)").font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+            }
+            .navigationTitle("Connectors")
+        }
+    }
+}
+EOF
+
+# ---------------- ExportsView ----------------
+cat <<'EOF' > "${APP_DIR}/Sources/Views/ExportsView.swift"
+import SwiftUI
+
+struct ExportsView: View {
+    @EnvironmentObject var state: AppState
+    @State private var status: String = ""
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Exports").font(.title2).bold()
+
+                Button("Share Overstock CSV (Local)") {
+                    let csv = DemoData.makeOverstockCSV(rows: DemoData.overstock)
+                    CSVShare.share(text: csv, filename: "overstock.csv")
+                    status = "Shared local CSV."
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button("Share Overstock CSV (From API)") {
+                    Task { await shareFromAPI() }
+                }
+                .buttonStyle(.bordered)
+                .disabled(state.demoMode || state.baseURL == nil)
+
+                Text(status).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding()
+            .navigationTitle("Exports")
+        }
+    }
+
+    private func shareFromAPI() async {
+        guard let base = state.baseURL else {
+            status = "Missing Base URL."
+            return
+        }
+        do {
+            let csv = try await API.downloadOverstockCSV(baseURL: base)
+            CSVShare.share(text: csv, filename: "overstock.csv")
+            status = "Shared API CSV."
+        } catch {
+            status = "Failed API export: \(error)"
+        }
+    }
+}
+EOF
+
+# ---------------- SettingsView ----------------
+cat <<'EOF' > "${APP_DIR}/Sources/Views/SettingsView.swift"
+import SwiftUI
+
+struct SettingsView: View {
+    @EnvironmentObject var state: AppState
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Mode") {
+                    Toggle("Demo Mode (no network)", isOn: $state.demoMode)
+                }
+
+                Section("Base URL (optional)") {
+                    TextField("https://your-demo.vercel.app", text: $state.baseURLString)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Text("If Demo Mode is OFF, the app will call /api/kpi, /api/overstock, /api/transfers/recommendations, /api/exports/overstock.csv.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Settings")
+        }
+    }
+}
+EOF
+
+echo "✅ Done. Repo created at: ./${APP_DIR}"
+echo ""
+echo "Next steps:"
+echo "  1) cd ${APP_DIR}"
+echo "  2) brew install xcodegen   (if needed)"
+echo "  3) xcodegen generate"
+echo "  4) open OverstockDemoIOS.xcodeproj"
